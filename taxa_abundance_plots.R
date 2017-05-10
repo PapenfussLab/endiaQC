@@ -1,10 +1,10 @@
 ## Using phyloseq data structures to make abundance charts for Phylum, Order or Genus
-## Bar charts and box-and-whiskers plots, for publication.
+## Bar charts and box-and-whiskers plots, for publication. Figures 2A, 3A, 4A and S3
+
 ## Working at stool-sample level - SampleNumber = 72 samples
 ## and sometimes at aliquot or biological replicate level = 215 or 216 samples
 ## Use OTUs with counts >= 20, as proportions of samples
 ## June 2016
-## Functions for rejected plots moved to taxa_abundance.R
 
 library("phyloseq")
 library(ggplot2)
@@ -73,62 +73,14 @@ genusLabelList <- c( # 4 o__Bacteroidales
   , 'g__Bifidobacterium'
   # 1 p__Verrucomicrobia
   , 'g__Akkermansia'
-  # # 2 p__Tenericutes
-  # , 'f__Anaeroplasmataceae',  'o__RF39'
   )
 palette_genus <- c(brewer.pal(5, "Reds")[c(4,2,3,5)], #  4 x red for bacter,
                    brewer.pal(6, "Blues")[c(4,2,5,3,6)],   # 5 x blue for firmi
                    brewer.pal(4, "Greens")[c(3,2,4)],   # 3 shades of green for proteo
                    palette_phyl[4:5],  # brown for actino, yellow for verruco
-                   #                  brewer.pal(3, "Purples")[3:2] # 2 x purple for tenericutes
                    palette_phyl[10]  # black for 'other'
 )
 
-
-makepsL4 <- function(phyl_L6props){
-  psL4prop <- tax_glom(phyl_L6props, taxrank="Rank4")
-  ## Abbreviate order and phylum names by removing leading "p__","o__"
-  tax_table(psL4prop)[,"Rank2"] <- sapply(tax_table(psL4prop)[,"Rank2"],
-                                          function(s){unlist(strsplit(s, '__'))[2]})
-  tax_table(psL4prop)[,"Rank4"] <- sapply(tax_table(psL4prop)[,"Rank4"],
-                                          function(s){unlist(strsplit(s, '__'))[2]})
-  psL4prop
-}
-
-makeL4propTop <- function(phyl_L4props, orderList = ordOrder) {
-  L4prop <- otu_table(phyl_L4props)
-  colnames(L4prop) <- data.frame(tax_table(phyl_L4props))[, "Rank4"]
-  return(L4prop[, orderList])
-}
-
-orderBarplot <- function(L4props, phyl_L4props){
-  L4propTop_df <- data.frame(L4props, personID=sample_data(phyl_L4props)$personID,
-                             Method=sample_data(phyl_L4props)$Method,
-                             DayXMethod=paste0(sample_data(phyl_L4props)$Stool, 
-                                               sample_data(phyl_L4props)$Method)  )
-  longProp <- melt(L4propTop_df, value.name='propAbund', 
-                   id.vars=c("Method", "DayXMethod", "personID"),
-                   variable.name='Order')
-  bars <- ggplot(longProp, aes(x=DayXMethod, y=propAbund, fill=Order))
-  bars + geom_bar(stat="identity") + 
-    scale_fill_manual(values = palette_order) + 
-    scale_y_continuous(expand = c(0, 0), limits=c(0, 1)) + 
-    labs(x="Day and method", 
-         y="Proportional abundance", 
-         title="Abundance of most-common bacterial orders (L4)") +
-    facet_wrap(~personID) + 
-    theme(axis.text.x = element_text(angle=-90, vjust=0.5
-     #                                , margin = margin(-1,0,0,0)
-   ) 
-        , axis.text.y = element_text(margin = margin(0,-1))
-        # margin t, r, b, l default unit is pt. Trailing 0s can be omitted
-        , axis.ticks=element_blank() # no ticks on x or y axis
-        , strip.background=element_rect(fill=NA) 
-#        , legend.key.size = unit(1, "lines") 
-        , legend.key = element_rect(size=NA)
-        , legend.position = "bottom"
-  )
-}
 
 applyNewGenusLabel <- function(tax){   ## Match the lowest possible taxa name to a name in genusLabelList
   tax_char <- as.vector(tax, mode="character")
@@ -166,7 +118,6 @@ genusBarplot <- function(phyl_L6props,
   longProp <- melt(summarypropdf, value.name='propAbund',
                    id.vars=c("DayXMethod", "personID"),
                    variable.name='genuslabel')
-  ## Rename some genuslabels - still to do!
   bars <- ggplot(longProp, aes(x=DayXMethod, y=propAbund, fill=genuslabel))
   bars + geom_bar(stat="identity") + 
     facet_wrap(~personID) + 
@@ -176,8 +127,6 @@ genusBarplot <- function(phyl_L6props,
     scale_fill_manual(values = palGenus, 
                       guide=guide_legend(nrow=4, title = "", keyheight = 0.5)) + 
     theme(axis.text.x = element_text(angle = -90, hjust=0, vjust=0.5)
-          # , axis.text.y = element_text(margin = margin(0,-1))
-          # , axis.ticks=element_blank() # no ticks on x or y axis
           , strip.background=element_rect(fill=NA) 
           , legend.key = element_rect(size=NA)
           , legend.position = "bottom"
@@ -287,33 +236,22 @@ localRdata_fp <- file.path(baseDir, "analysis_tools/endia_biomR",
 ## (bar plots sum values by default - using 215 samples gives sum of 2 or 3 values per bar)
 load(file.path(localRdata_fp, "Stdcounts_and_props.rdata"), verbose=TRUE) 
 
-### Order barplot (L4), top 10 
-## October 2016 ENDIA-QC paper: Fig 2a
-# psL4prop <- makepsL4(phyl_L6props=psL6prop)
-# L4propTop <- makeL4propTop(phyl_L4props=psL4prop, orderList = ordOrder)
-# bars <- orderBarplot(L4props = L4propTop, phyl_L4props = psL4prop) 
-# print(bars )
-# plot_name <- file.path(imageDir, "barPropL4_phylaColours84w.pdf") 
-# ## Output to PDF file
-# ggsave( filename= plot_name,  
-#         width=84, height=110, units="mm")
-##------------
-
 ## Genus barplot (L6), list above of genus, or higher label where genus undefined,
-## present in at least 10% in any sample. November 2016 ENDIA-QC paper: new Fig 2a
+## present in at least 10% in any sample. Fig 2A
 genuslabelbars <- genusBarplot(psL6prop) # other parameters as default
 ## Save to pdf
 plot_name <- file.path(imageDir, "barPropGenus_phylaColours84w.pdf") 
 genuslabelbars
 ggsave( filename= plot_name,  
         width=84, height=110, units="mm")
-##-----------
 
 ### Order (L4) box-and-whiskers, with log-scale ####
+## Fig S3A
 boxes <- orderBoxplot(phyl_L6counts = l6Std) 
 print(boxes)
 ggsave( filename= file.path(imageDir, "boxPropOrderColourPhylumLvl2.pdf"), 
         width=297, height=210, units="mm")
+##-----------
 
 ### Load the proportional counts for 215 samples. ###
 ## Box-and whiskers above can be re-done with more points if desired. 
@@ -321,13 +259,9 @@ ggsave( filename= file.path(imageDir, "boxPropOrderColourPhylumLvl2.pdf"),
 ## as only 3 stools-samples per Method.personID entry
 load(file.path(localRdata_fp, "Stdcounts_and_propsLvl2.rdata"), verbose=TRUE) 
 
-# methodBox_facetPhylum(phyl_L6props=psL6prop, phylOrder=phylOrder, Nphyla = 4)
-# ggsave( filename= file.path(imageDir, "boxProp4PhylaFacets_Method84.85.pdf"), 
-#         width=84, height=85, units="mm")  ## October Fig 4a
-
 ### Mean and sd at the Lvl2 (aliquot) level, faceted by Phylum ###
 ## Top 4 phyla, log-transformed standardised counts for 215 samples
-## December 2016 ENDIA-QC paper: Fig 4a 
+## Fig 3A 
 phyla_stats_summary <- avg_log_transform_fn(psOTUstd)
 log_sd_plot <- log_sd_xPerson_fPhyla_plot(phyla_stats_summary)
 log_sd_plot
@@ -344,36 +278,26 @@ imageDir <- file.path(baseDir, "analysis/local/taxabund_plots/")
 ## Load the proportional counts for 72 samples
 load(file.path(localRdata_fp, "Stdcounts_and_props.rdata"), verbose=TRUE) 
 
-### Order (L4) barplot, ordOrder list 
-## October 2016 ENDIA-QC paper: Fig 2d
-# psL4prop <- makepsL4(phyl_L6props=psL6prop)
-# L4propTop <- makeL4propTop(phyl_L4props=psL4prop, orderList = ordOrder)
-# bars <- orderBarplot(L4props = L4propTop, phyl_L4props = psL4prop) 
-# print(bars)
-# plot_name <- file.path(imageDir, "barPropL4_phylaColours84w.pdf") 
-# ## Output to PDF file, custom size with 1/2 width of display area
-# ggsave( filename= plot_name,  
-#         width=84, height=110, units="mm")
-##------------
-
 ## Genus barplot (L6), list above of genus, or higher label where genus undefined,
-## present in at least 10% in any sample. ## November 2016 ENDIA-QC paper: new Fig 2d
+## present in at least 10% in any sample. 
+## Fig 4B
 genuslabelbars <- genusBarplot(psL6prop) # other parameters as default
 ## Save to pdf
 plot_name <- file.path(imageDir, "barPropGenus_phylaColours84w_halfheightkey.pdf") 
 genuslabelbars
 ggsave( filename= plot_name,  
         width=84, height=110, units="mm")
+
 ##-----------
 load(file.path(localRdata_fp, "Stdcounts_and_propsLvl2.rdata"), verbose=TRUE) 
-### Order (L4) box-and-whiskers, with log-scale. Supplementary Fig. 
+### Order (L4) box-and-whiskers, with log-scale. Supplementary Fig. S3B
 boxes <- orderBoxplot(phyl_L6counts = l6Std) 
 print(boxes)
 ggsave( filename= paste0(imageDir, "boxPropOrderColourPhylumLvl2.pdf"), 
         width=297, height=210, units="mm")
 
 ### Mean and sd at the Lvl2 (aliquot) level, faceted by Phylum  ###
-## Top 4 phyla, log-transformed standardised counts for 215 samples. Suppl Fig
+## Top 4 phyla, log-transformed standardised counts for 215 samples. Suppl Fig. 6C
 phyla_stats_summary <- avg_log_transform_fn(l6Std)
 log_sd_plot <- log_sd_xPerson_fPhyla_plot(phyla_stats_summary)
 log_sd_plot
