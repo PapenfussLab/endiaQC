@@ -9,3 +9,4 @@ Stdcounts_and_props.rdata:
 Stdcounts_and_propsLvl2.rdata:
   216 aliquots
   
+Deleted them - too big - try a different approach
