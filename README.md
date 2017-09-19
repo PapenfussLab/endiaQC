@@ -1,6 +1,6 @@
 # endiaQC
-Code and files for ENDIA microbiome QC paper
+R scripts that need to be made available for ENDIA microbiome QC paper
 
-R scripts that need to be made available. Plan is to use this as intermediate stage before making R Notebook.
+Draft paper is at http://www.biorxiv.org/content/early/2017/09/18/175877 
 
 Data is at  https://figshare.com/articles/ENDIA_microbiome_QC_OTUs_and_metadata/5401594
