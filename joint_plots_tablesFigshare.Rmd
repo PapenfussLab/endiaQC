@@ -1,0 +1,1610 @@
+---
+title: "Plots and data for ENDIA-QC paper as R Notebook"
+output:
+  html_document: default
+  html_notebook: default
+---
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+This Notebook will not save files, but display plots on screen, 
+and indicate with commented-out lines where data would be saved in original work
+
+First chunk loads 2 essential packages, and fetches the data from Figshare.
+https://figshare.com/articles/ENDIA_microbiome_QC_OTUs_and_metadata/5401594
+This is a 43MB tar file, so use with caution
+```{r package_data}
+library("phyloseq", quietly = TRUE)
+library(ggplot2, quietly = TRUE)
+theme_set(theme_bw(base_size=18))
+# baseDir <- file.path("/wehisan/bioinf/bioinf-data/Papenfuss_lab/projects/metagenomics",
+#                      "ENDIA/ENDIA_QC")
+download.file(url="https://ndownloader.figshare.com/files/9303850", destfile="OTUs.tar")
+data_fp <- "OTU_data"
+untar("OTUs.tar", exdir = data_fp, verbose = TRUE)
+
+```
+
+The next chunk reads the WW biom file and other associated files and creates some phyloseq data objects
+First the minimum-count=3 objects. 
+```{r load_biom_phylo_part_1}
+## Set up filename variables
+biom_fp <- file.path(data_fp, "WW_otu_table_mc3_allmeta.biom")
+tree_fp <- file.path(data_fp, "WW_rep_set_nonchim_mc20.tre") 
+map_fp <- file.path(data_fp, "mappingfullSampleInfoComplete.txt")
+# localRdata_fp <- "local_WEHI"
+# if (!file.exists(localRdata_fp)) dir.create(localRdata_fp)
+
+phyloData = import_biom(biom_fp)  
+
+## Remove samples with small counts
+## Histograms of sample_sums gives guidance as to choice of minimum sample size.
+min(sample_sums(phyloData))
+hist(sample_sums(phyloData))
+```
+
+
+```{r load_biom_phylo_part_2}
+hist(sort(sample_sums(phyloData))[1:30], breaks = 20)
+minSampleSize <- 1000 # Choice based on distribution
+phyloData2 <- prune_samples(sample_sums(phyloData) >= minSampleSize, phyloData)
+
+## filter out samples with values for PCRsuccess of 'No' or 'Very faint' .
+phyloData <- prune_samples(sample_data(phyloData2)$PCRsuccess %in% c('Yes', 'Faint'),
+                         phyloData2)
+# save(phyloData, file=file.path(localRdata_fp, "phylo_mc3NoChimeraMin1000PCRyes_faint.rdata"))
+rm(phyloData2)
+
+## Make a data object for a min-count=3 version merged to level2 :
+otuBySamplemc3 <- merge_samples(phyloData, group="SampleNumLvl2")
+## Remove column names that don't apply to merged categories.
+varsBySample <- c("SampleNumber", "SampleNumLvl2", "seqRunDate", "personID",
+                  "Gender", "Stool", "Method", "HoursToNeg80Storage")
+
+sample_data(otuBySamplemc3) <- sample_data(otuBySamplemc3)[, varsBySample]
+for (v in varsBySample) {
+  sample_data(otuBySamplemc3)[[v]]<-
+    sapply(sample_names(otuBySamplemc3), function(x) {
+      unique(sample_data(phyloData)[
+        which(sample_data(phyloData)$SampleNumLvl2== x)][[v]])
+    } )
+}
+# save(otuBySamplemc3,
+#      file=file.path(localRdata_fp, "phyloDataBySampleLvl2_mc3_PCRfilt.rdata") )
+
+## Also a min-count=3 merged to SampleNumber:
+psSample_mc3 <- merge_samples(otuBySamplemc3, group="SampleNumber")
+varsBySample <- setdiff(varsBySample, "SampleNumLvl2")
+for (v in varsBySample) {
+  sample_data(psSample_mc3)[[v]]<- 
+    sapply(sample_names(psSample_mc3), function(x) {
+      unique(sample_data(otuBySamplemc3)[ 
+        which(sample_data(otuBySamplemc3)$SampleNumber== x)][[v]])
+    } )
+}
+## Remove column names that don't apply to merged categories. 
+sample_data(psSample_mc3) <- sample_data(psSample_mc3)[,varsBySample]
+# save(psSample_mc3,
+#      file=file.path(localRdata_fp, "phyloDataBySample_mc3.rdata") )
+
+rm(biom_fp, data_fp, map_fp)
+
+```
+These variables are used for alpha diversity measures
+
+First the rarefaction curves, as this code does the multiple sub-sampling
+
+```{r alpha_rarefaction_extended}
+## Downsampling plot of alpha diversity 
+## Supplementary Figure S3A
+## Saved measures of diversity used in alpha_richness_plots.R
+
+require('plyr') # ddply
+require('reshape2') # melt
+## Sample for rarefaction curves with 'replace=FALSE' so that end points of curves match full data
+calculate_rarefaction_curves <- function(psdata, measures, depths) {
+
+    estimate_rarified_richness <- function(psdata, measures, depth) {
+    if(max(sample_sums(psdata)) < depth) return()
+    psdata <- prune_samples(sample_sums(psdata) >= depth, psdata)
+    
+    rarified_psdata <- rarefy_even_depth(psdata, depth, replace=FALSE, verbose = FALSE)
+    
+    alpha_diversity <- estimate_richness(rarified_psdata, measures = measures)
+    
+    # as.matrix forces the use of melt.array, which includes the Sample names (rownames)
+    molten_alpha_diversity <- melt(as.matrix(alpha_diversity), 
+                                   varnames = c('Sample', 'Measure'), value.name = 'Alpha_diversity')
+    
+    molten_alpha_diversity
+  }
+  
+  names(depths) <- depths # this enables automatic addition of the Depth to the output by ldply
+  rarefaction_curve_data <- ldply(depths, estimate_rarified_richness, psdata = psdata, 
+                                  measures = measures, .id = 'Depth', 
+                                  .progress = ifelse(interactive(), 'text', 'none'))
+  
+  # convert Depth from factor to numeric
+  rarefaction_curve_data$Depth <- as.numeric(levels(rarefaction_curve_data$Depth))[
+    rarefaction_curve_data$Depth]
+  
+  rarefaction_curve_data
+}
+
+# localRdata_fp <- "local_WEHI"
+# load(
+#   file = file.path(localRdata_fp, "phyloDataBySample_mc3.rdata"),
+#   verbose = TRUE
+# )
+set.seed(55)
+rarefaction_curve_data <- calculate_rarefaction_curves(psSample_mc3, c('InvSimpson', 'Obs'), 
+                                                       rep(c( 1:10 * 30000), each = 8))
+if (!setequal(as.character(rarefaction_curve_data$Sample),
+              row.names(sample_data(psSample_mc3)))) {
+  rarefaction_curve_data$Sample <-
+    sub("^X", "", rarefaction_curve_data$Sample)
+  if (setequal(as.character(rarefaction_curve_data$Sample),
+               gsub('-', ".", row.names(sample_data(psSample_mc3))))) {
+    rarefaction_curve_data$Sample <-
+      gsub(".",
+           "-",
+           as.character(rarefaction_curve_data$Sample),
+           fixed = TRUE)
+  }
+}
+
+rarefaction_curve_data_verbose <- merge(
+  rarefaction_curve_data,
+  data.frame(sample_data(psSample_mc3)),
+  by.x = 'Sample',
+  by.y = 'row.names'
+)
+
+rarefaction_curve_data_means <-
+  ddply(
+    rarefaction_curve_data_verbose,
+    c('Depth', 'Measure', 'personID', "Sample"),
+    summarise,
+    Alpha_diversity_mean = mean(Alpha_diversity),
+    Alpha_diversity_sd = sd(Alpha_diversity),
+    Alpha_diversity_sem = sd(Alpha_diversity)/sqrt(length(Alpha_diversity))
+    # Standard error of mean = s.d./sqrt(n) . n = #samples at that Depth * 8 subsamples
+  )
+
+# save(rarefaction_curve_data_verbose, rarefaction_curve_data_means, 
+#      file=file.path(localRdata_fp, "rareWEHI72mc3_woReplace_v2.rdata")) 
+
+ggplot(
+  data = rarefaction_curve_data_means[rarefaction_curve_data_means$Measure %in%
+                                           c("Observed", "InvSimpson"), ], 
+  mapping = aes(
+    x = Depth,
+    y = Alpha_diversity_mean,
+    ymin = Alpha_diversity_mean - Alpha_diversity_sd,
+    ymax = Alpha_diversity_mean + Alpha_diversity_sd,
+    colour = personID,
+    group = Sample,
+    shape=personID
+  )
+) + geom_line(show.legend = NA) + # NA means default = show
+  geom_point(size=2)  + # geom_pointrange omitted because invisible
+  geom_vline(xintercept = min(sample_sums(psSample_mc3))) + 
+  labs(title="WEHI sample richness 72 samples, mc3, sampling without replacement",
+       y="Mean alpha diversity",
+       colour='Participant', shape='Participant') + 
+  facet_wrap(facets = ~ Measure,
+             scales = 'free_y')
+## Supplementary Figure S3A
+rm(rarefaction_curve_data_verbose)
+```
+
+
+```{r alpha_richness_plots}
+## Make the alpha diversity and library size plots. 
+## Use all OTUs (min count=3), agglomerated to Level2=aliquots= 215 or 216 samples
+library("RColorBrewer")
+
+## 2 measures side-by-side, downsampled data
+## Uses multiple subsamplings saved earlier using code in alpha_rarefaction_extended.R
+# load(file.path(localRdata_fp, "rareWEHI72mc3_woReplace_v2.rdata"), verbose=TRUE)
+
+alpha_sub_ObsSimp <- rarefaction_curve_data_means[
+  rarefaction_curve_data_means$Measure %in% c("Observed", "InvSimpson"), ]
+prboxes <- ggplot(
+  data = alpha_sub_ObsSimp,
+  mapping = aes(x = personID,
+                y = Alpha_diversity_mean) 
+) + 
+  geom_boxplot(size=0.3, outlier.size=0.5) + 
+  facet_wrap(facets = ~ Measure,
+             scales = 'free_y')
+
+prboxes + expand_limits(y=c(0,80)) + # hack to make y-axes match for InvSimpson between WEHI and BCM
+  labs(title="72 Samples (12 per box), WEHI data, mean of 10 subsamples", 
+               x = 'Participant', 
+               y = 'Alpha diversity')
+## Figure 2B
+rm(rarefaction_curve_data_means, alpha_sub_ObsSimp)
+
+## Facet by personID, x-axis = Stool, colour and shape show Method: InvSimpson only
+## 215 dodged dots in sets of 3. 
+# load(file.path(localRdata_fp, "phyloDataBySampleLvl2_mc3_PCRfilt.rdata"), verbose=TRUE)
+pr <- plot_richness(otuBySamplemc3, x="Stool", measures="InvSimpson", color = "Method", shape="Method")
+pr <- pr + expand_limits(y=0) + scale_color_brewer(palette="Set1")
+prfacets <- pr + facet_wrap(~ personID, scales='free_y')
+prbeads <- prfacets + geom_point(position = position_dodge(width=0.5) )
+prbeads$layers <- prbeads$layers[2:3]  #layer 2 is free_y, layer 3 is position_dodge
+prbeads + labs(title="Samples at aliquot level (215), full WEHI data",
+               x = "Day", 
+               y = "Inverse Simpson Index")
+## Figure 3B
+
+## Library sizes. 
+## As stacked bar chart for each sample at stool level (72), coloured by aliquot with lines for wells
+## Supplementary Figure S1A
+
+# load(file=file.path(localRdata_fp, "phylo_mc3NoChimeraMin1000PCRyes_faint.rdata"), verbose=TRUE)
+
+libsize_df <- data.frame(libsize=sample_sums(phyloData),
+                         sample_data(phyloData),
+                         sXm=paste0(sample_data(phyloData)$Stool, 
+                                    sample_data(phyloData)$Method)
+                         )
+libsize_df$aliquot <- as.factor(
+  sapply(strsplit(as.character(sample_data(phyloData)$SampleNumLvl2), '-'), "[[", 2)
+)
+
+ggplot(libsize_df[order(libsize_df$aliquot),], aes(x=sXm, y=libsize, fill=aliquot)) + 
+  geom_bar(stat="identity", col="black", size=0.1) + 
+  facet_wrap(~personID, scales="free_x") + 
+  theme(axis.text.x = element_text(angle = -90, hjust=0, vjust=0.5)) + 
+  scale_fill_brewer(palette="Pastel1") +
+  labs(y="Number of sequences", title="", 
+       x="Sample: day and method") + 
+  guides(fill=FALSE)
+## Supplementary Figure S1A
+
+## Library sizes. Box-and-whiskers by Method
+ggplot(libsize_df, aes(x=Method, y=libsize)) +
+  geom_boxplot() +
+  expand_limits(y=0) +
+  labs(x = "Collection-processing method", 
+       y="Sequences per PCR well",
+       title="Size of 702 Samples, min count=3")
+## Supplementary Figure S5A
+
+```
+
+Remaining WW analysis is done with minimum-count=20
+
+```{r load_biom_phylo_part_3}
+## Suppress small OTUs
+minOTUsize <- 20
+psOTUge20 <- prune_taxa(taxa_sums(phyloData) >= minOTUsize, phyloData)
+phylotree <- read_tree(tree_fp)
+psWtree <- merge_phyloseq(psOTUge20, phylotree)
+
+## Merge PCR replications, but keep sample replications. 
+otuBySampleBy3 <- merge_samples(psWtree, "SampleNumLvl2")
+## Remove column names that don't apply to merged categories.
+sample_data(otuBySampleBy3) <- sample_data(otuBySampleBy3)[, varsBySample]
+## Restore sample data from the original object.
+## For each merged sample, find the sample_data(phyloData) records
+for (v in varsBySample) {
+  sample_data(otuBySampleBy3)[[v]] <-
+    sapply(sample_names(otuBySampleBy3), function(x) {
+      unique(sample_data(psWtree)[
+        which(sample_data(psWtree)$SampleNumLvl2== x)][[v]])
+    } )
+}
+# save(otuBySampleBy3, file=file.path(localRdata_fp, "phyloDataBySampleLvl2.rdata"))
+rm(phyloData, phylotree, tree_fp, psOTUge20 )
+
+## Merge well counts and repeated samples . 
+otuBySample <- merge_samples(otuBySampleBy3, "SampleNumber")
+## This loses some or all the sample data 
+## Restore sample data from the original object. 
+for (v in varsBySample) {
+  sample_data(otuBySample)[[v]]<- 
+    sapply(sample_names(otuBySample), function(x) {
+      unique(sample_data(otuBySampleBy3)[ 
+        which(sample_data(otuBySampleBy3)$SampleNumber== x)][[v]])
+    } )
+}
+## Remove column names that don't apply to merged categories. 
+sample_data(otuBySample)$SampleNumLvl2 <- NULL
+
+## Standardise counts to largest library size (scaled proportions)
+libSizeMax <- max(sample_sums(otuBySample))
+standf = function(x) round(libSizeMax * x / sum(x))
+psOTUstd <- transform_sample_counts(otuBySample, standf)
+## Make a data object of proportions, as well
+psOTUprop <- transform_sample_counts(otuBySample, function(x) (x / sum(x)))
+
+## Agglomerate counts with the same taxa to Rank 6, Genus-level, and replace Rank 7 with last defined rank
+######
+## Function to take a single row of a tax-table such as tax_table(l6Std) 
+## and return the most detailed known Rank label, with NAs and '__'s appended.
+## Added "uncultured" to the test for not known, for Silva taxonomy format
+fill_to_defined_level <- function(taxL6) {
+  tax_char <- as.vector(taxL6, mode="character")
+  if (tax_char[1]=="Unassigned") {
+    filledRank <- "Unassigned"    }
+  else {
+    filledRank <- tax_char[6]    # Starting point is Rank6, genus-label
+    for (rank in 6:3) {
+      if (is.na(tax_char[rank]) | 
+          length(unlist(strsplit(tax_char[rank], "__")))==1 |
+          grepl("uncultured", unlist(strsplit(tax_char[rank], "__"))[2]) ) {
+        filledRank <- paste(tax_char[rank-1], filledRank, sep=";") }
+    }
+  }
+  filledRank
+}
+
+genus_glom <- function(psOTU) {
+  psL6 <- tax_glom(psOTU, taxrank="Rank6", NArm=FALSE)
+  ## Remove the completely Unassigned OTU(s) from standardised genus counts
+  psL6filt <- prune_taxa(as.vector(tax_table(psL6)[,"Rank1"]!="Unassigned"), psL6)
+  ## replace "Rank7" column with one filled to last defined label
+  tax_table(psL6filt)[,7] <- apply(tax_table(psL6filt), 1, fill_to_defined_level)
+  colnames(tax_table(psL6filt))[7] <- "lastDefRank"
+  psL6filt
+}
+
+psL6prop_72 <- genus_glom(psOTUprop)
+l6Std_72 <- genus_glom(psOTUstd)
+# save(l6Std_72, psL6prop_72, file=file.path(localRdata_fp, "Stdcounts_and_props.rdata"))
+rm(psOTUstd, psOTUprop)
+
+### Repeat for Lvl2 data:
+libSizeMax <- max(sample_sums(otuBySampleBy3))
+psL6prop <- genus_glom(transform_sample_counts(otuBySampleBy3, function(x) (x / sum(x))))
+l6Std <- genus_glom(transform_sample_counts(otuBySampleBy3, standf))
+# save(l6Std, psL6prop, file=file.path(localRdata_fp, "Stdcounts_and_propsLvl2.rdata"))
+
+rm(v, varsBySample, libSizeMax, otuBySamplemc3, psSample_mc3)
+```
+
+
+```{r taxa_abundance_plots}
+## Using phyloseq data structures to make abundance charts for Phylum, Order or Genus
+## Bar charts and box-and-whiskers plots, for publication. Figures 2A, 3A,C and S2A.
+## Use OTUs with counts >= 20, as proportions of samples
+require("RColorBrewer")
+require('reshape2') # melt
+
+Ntop <- 10
+palette_phyl <- c(brewer.pal(9, "Set1"), "#000000", brewer.pal(9, "Pastel1"))  
+## extended for more than 9 phyla. 
+## Swap some colours: Red, blue, green, brown, yellow, purple, orange
+palette_phyl <- palette_phyl[c(1:3, 7, 6, 4, 5, 8:length(palette_phyl))]
+
+## Consistent colours needed for 2 data sets, so hard-coding phylOrder. As BCM seqs gave 12 phyla,
+## I am using that order, rather than the local WEHI seqs 10 phyla order
+## Top 7 or 9 the WEHI and BCM sets are equal - top 8 they differ
+phylOrder <- c( "Bacteroidetes",  
+               "Firmicutes",     
+               "Proteobacteria", 
+               "Actinobacteria", 
+               "Verrucomicrobia",
+               "Tenericutes",    
+               "Cyanobacteria",  
+               "Euryarchaeota",  
+               "Lentisphaerae",  
+               "Fusobacteria",   
+               "TM7",            
+               "Deferribacteres")
+
+## For same reason, hardcode orderOrder
+## I want a mix of highest average proportion and highest maximum proportion
+## The 12 that have a proportion in some sample greater than 2% in BCM data makes 
+## a good list - it includes the WEHI top 10 and BCM top 9. 
+## Union of the 2 top 10s would add Desulfovibrionales, a 5th Proteobacteria
+
+# tax_table(psL4prop)[which(apply(otu_table(psL4prop), 2, max) >=0.02), c(2,4)]
+ordOrder <- c( # 1 x bacteriodetes, 2 x firmicutes
+  "Bacteroidales", "Clostridiales", "Erysipelotrichales", 
+  # 4 x proteobacteria
+  "Burkholderiales", "Pasteurellales", "RF32", "Enterobacteriales", 
+  # 1 actinobacteria 
+  "Bifidobacteriales", 
+  # 1 verrucomicrobia 
+  "Verrucomicrobiales", 
+  # 2 x tenericutes 
+  "Anaeroplasmatales", "RF39", 
+  #1 cyanobacteria
+  "YS2" )
+palette_order <- c(palette_phyl[1], #  red for bacter,
+                   brewer.pal(3, "Blues")[3:2],   # 2 x blue for firmi
+                   brewer.pal(5, "Greens")[5:2],   # 4 shades of green, dark to pale
+                   palette_phyl[4:5],  # brown for actino, yellow for verruco
+                   brewer.pal(3, "Purples")[3:2], # 2 x purple for tenericutes
+                   palette_phyl[7]     # orange for cyanobacteria
+)
+
+## List of genus, or higher label where genus undefined,  present in at least 10% in any sample. 
+##  Compromise list for showing representative genera in WEHI and BCM data
+genusLabelList <- c( # 4 o__Bacteroidales
+  'g__Bacteroides', 'g__Prevotella' , 'f__S24-7', 'o__Bacteroidales'
+  # 5 o__Clostridiales 
+  , 'g__Lachnospira', 'g__Blautia', 'f__Lachnospiraceae', 'g__Faecalibacterium', 'o__Clostridiales' 
+  # 3 p__Proteobacteria 
+  , 'g__Sutterella', 'g__Haemophilus', 'Proteobacteria' 
+  # 1 p__Actinobacteria
+  , 'g__Bifidobacterium'
+  # 1 p__Verrucomicrobia
+  , 'g__Akkermansia'
+  )
+palette_genus <- c(brewer.pal(5, "Reds")[c(4,2,3,5)], #  4 x red for bacter,
+                   brewer.pal(6, "Blues")[c(4,2,5,3,6)],   # 5 x blue for firmi
+                   brewer.pal(4, "Greens")[c(3,2,4)],   # 3 shades of green for proteo
+                   palette_phyl[4:5],  # brown for actino, yellow for verruco
+                   palette_phyl[10]  # black for 'other'
+)
+
+
+applyNewGenusLabel <- function(tax){   ## Match the lowest possible taxa name to a name in genusLabelList
+  tax_char <- as.vector(tax, mode="character")
+  checkrank <- 7
+  newRank <- tax_char[checkrank]    # 'lastDefRank' in column 7 is starting point 
+  while (! newRank %in% genusLabelList & checkrank >2){ # if not in list, return phylum=Rank1
+    checkrank <- checkrank - 1
+    newRank <- tax_char[checkrank] 
+  }
+  newRank
+}
+
+genusBarplot <- function(phyl_L6props,
+                         phylOrd = phylOrder,
+                         Nphyla = 6, 
+                         palGenus = palette_genus, 
+                         genusOrder = genusLabelList
+){
+  tax_table(phyl_L6props)[,"Rank2"] <- sapply(tax_table(phyl_L6props)[,"Rank2"],
+                                          function(s){if (grepl('__', s)) 
+                                            unlist(strsplit(s, '__'))[2] else s})
+  tax_table(phyl_L6props)[,'Rank2'] <- apply(tax_table(phyl_L6props), 1, applyNewGenusLabel)
+  # 'Rank2' column now holds genus-label value instead of phylum
+  psL6summary <- tax_glom(phyl_L6props, 'Rank2')
+  summaryprop <- otu_table(psL6summary)
+  colnames(summaryprop) <- as.data.frame(tax_table(psL6summary))[, "Rank2"]
+  summarypropdf <- data.frame(summaryprop[, intersect(genusOrder, colnames(summaryprop))], 
+                              # intersect drops items not in list, keeps in list order, and is OK if any missing
+                              # if(taxa_are_rows(summaryprop)) this won't work, need to transpose
+                              personID=sample_data(psL6summary)$personID,
+                              DayXMethod=paste0(sample_data(psL6summary)$Stool,
+                                                sample_data(psL6summary)$Method)  )
+  summarypropdf$Otherbacteria <- apply(summaryprop[, setdiff(colnames(summaryprop), genusOrder)], 
+                                       1-taxa_are_rows(summaryprop), sum)
+  longProp <- melt(summarypropdf, value.name='propAbund',
+                   id.vars=c("DayXMethod", "personID"),
+                   variable.name='genuslabel')
+  bars <- ggplot(longProp, aes(x=DayXMethod, y=propAbund, fill=genuslabel))
+  bars + geom_bar(stat="identity") + 
+    facet_wrap(~personID) + 
+    labs(x="Day and method",
+         y="Proportional abundance", 
+         title="") +
+    scale_fill_manual(values = palGenus, 
+                      guide=guide_legend(nrow=4, title = "", keyheight = 0.5)) + 
+    theme(axis.text.x = element_text(angle = -90, hjust=0, vjust=0.5)
+          , strip.background=element_rect(fill=NA) 
+          , legend.key = element_rect(size=NA)
+          , legend.position = "bottom"
+    )
+
+}
+
+
+orderBoxplot <- function(phyl_L6counts,
+                         phylOrd = phylOrder , 
+                         palPhyl = palette_phyl) {
+  psL4propNo0 <- transform_sample_counts(tax_glom(phyl_L6counts, taxrank="Rank4") , 
+                                         function(x) ( (x+1)/sum(x) ))
+  tax_table(psL4propNo0)[,"Rank2"] <- sapply(tax_table(psL4propNo0)[,"Rank2"],
+                                             function(s){unlist(strsplit(s, '__'))[2]})
+  tax_table(psL4propNo0)[,"Rank4"] <- sapply(tax_table(psL4propNo0)[,"Rank4"],
+                                             function(s){unlist(strsplit(s, '__'))[2]})
+  ## This uses the phyloseq 'plot_bar' function to set the ggplot data and aesthetics. 
+  ## Two boxplots are added, 1st with border and point colours from Phylum, including 
+  ## the default solid circle outliers. The 2nd has black borders, open circle outliers 
+  ## and coloured fill. This has the effect of colouring outliers to match bars.
+  ## The original barplot layer is then removed
+  pbox <- plot_bar(psL4propNo0, x="Rank4") + scale_y_log10() + 
+    geom_boxplot(aes(colour=Rank2)) + 
+    geom_boxplot(aes(fill=Rank2), outlier.shape=21) + 
+    labs(title="Proportion of bacterial Orders in each sample (log scale)", y="Proportion",
+         x=element_blank()) +
+    scale_fill_manual(values=palPhyl, name="Phylum") + 
+    scale_colour_manual(values=palPhyl, name="Phylum") + 
+    theme(axis.text.x = element_text(vjust=0.5))
+  pbox$layers <- pbox$layers[-1]
+  ## X-axis goes in order of decreasing total sum of proportions
+  barOrder <- tax_table(psL4propNo0)[names(sort(taxa_sums(psL4propNo0), TRUE)),"Rank4"]
+  pbox$data$Rank4 <- factor(pbox$data$Rank4, levels=barOrder) 
+  pbox$data$Rank2 <- factor(pbox$data$Rank2, levels=phylOrd) 
+  pbox  
+}
+
+avg_log_transform_fn <- function(phylobject, rank = "Rank2", topNum=4, rankOrder=phylOrder){
+  ## Agglomerate counts to Rank 2, Phylum, discard least abundant 
+  ## and transform to natural log + 1
+  rank_glom <- tax_glom(phylobject, taxrank = rank)
+  ## Abbreviate phylum names by removing leading "p__"
+  tax_table(rank_glom) <- apply(tax_table(rank_glom), 1:2, 
+                                        function(s){if (grepl('__', s))
+                                          unlist(strsplit(s, '__'))[2] else
+                                            s})
+  ## Put sample data in a dataframe
+  samplesPs <- data.frame(sample_data(rank_glom),
+                            stringsAsFactors = FALSE)
+  ## Put counts in a dataframe
+  if (taxa_are_rows(rank_glom)) {
+    phylacounts <- data.frame(t(otu_table(rank_glom)))
+  } else {
+    phylacounts <- data.frame(otu_table(rank_glom))
+  }
+  colnames(phylacounts) <- tax_table(rank_glom)[,rank]
+  ## Combine counts and sample_data, keep only topNum
+  top_rank_df <- data.frame(phylacounts[,rankOrder[1:topNum]],
+                            samplesPs
+  )
+  ## Convert phyla as column names to column of phyla names in long format
+  top_rank_long <- melt(top_rank_df, measure.vars =c(1:topNum), variable.name = rank)
+  top_rank_long$log_yij <- log1p(top_rank_long$value)  # using ln(value + 1) 
+  require(plyr)
+  top_rank_summary <- ddply(top_rank_long,
+                            .(Rank2, personID, Method), summarise,
+                            meanij=mean(value), sdij=sd(value),
+                            meanlnij=mean(log_yij), varlnij=var(log_yij),
+                            num_reps = length(log_yij))
+}
+
+log_sd_xPerson_fPhyla_plot <- function(stats_per_cell_df){
+  ggplot(data=stats_per_cell_df,
+         aes(x=personID, y=meanlnij, colour=Method, shape=Method)) +
+    geom_point(position=position_dodge(width=0.5)
+               , size=1
+    ) +
+    geom_errorbar(aes(ymin=meanlnij-sqrt(varlnij), ymax=meanlnij+sqrt(varlnij))
+                  , position=position_dodge(width=0.5)
+                  , width=0.5
+                  , alpha=0.6
+                  , show.legend = FALSE) +
+    facet_wrap(~Rank2, scales='free_y') +
+    labs(x='Person', 
+         y='log(standardised count)' ) +
+    scale_color_brewer(palette = 'Set1') +
+    #scale_colour_discrete(name='Method', palette='Set1') +
+    theme(legend.key.size = unit(1, "lines")
+          , legend.key = element_rect(size=NA)
+          , legend.position = "bottom"
+          , legend.spacing = unit(0, "cm")
+          , strip.background=element_rect(fill=NA)
+    )
+}
+
+
+######### End of function definitions########
+
+## Use the proportional counts for 72 samples: 
+## (bar plots sum values by default - using 215 samples gives sum of 2 or 3 values per bar)
+# load(file.path(localRdata_fp, "Stdcounts_and_props.rdata"), verbose=TRUE) 
+
+## Genus barplot (L6), list above of genus, or higher label where genus undefined,
+## present in at least 10% in any sample. 
+genuslabelbars <- genusBarplot(psL6prop_72) # other parameters as default
+genuslabelbars
+## Figure 2A
+
+### Order (L4) box-and-whiskers, with log-scale ####
+boxes <- orderBoxplot(phyl_L6counts = l6Std_72) 
+print(boxes)
+## Supplementary Figure S2A
+
+### Use the proportional counts for 215 samples. ###
+# load(file.path(localRdata_fp, "Stdcounts_and_propsLvl2.rdata"), verbose=TRUE) 
+
+### Mean and sd at the Lvl2 (aliquot) level, faceted by Phylum ###
+## Top 4 phyla, log-transformed standardised counts for 215 samples
+phyla_stats_summary <- avg_log_transform_fn(l6Std)
+log_sd_plot <- log_sd_xPerson_fPhyla_plot(phyla_stats_summary)
+log_sd_plot
+## Figure 3A 
+
+## Linear regression of top 4 phyla, log-transformed standardised counts for 215 samples
+## Average for person (j) compared to average within Method (ij). 
+avgs_per_person <- ddply(phyla_stats_summary, .(personID, Rank2), summarise,
+                         meanj=mean(meanlnij), varj = weighted.mean(varlnij, num_reps-1) )
+phyla_stats_summary <- merge(phyla_stats_summary,  merge(x=phyla_stats_summary, y=avgs_per_person, 
+                                                     by.x= c('Rank2', 'personID'),
+                                                     by.y= c('Rank2', 'personID'), all=TRUE))
+
+ggplot(phyla_stats_summary, aes(x=meanj, y=meanlnij, shape=Method, colour=Method)) +
+  geom_smooth(method = "lm", se = FALSE, aes(group=Method), 
+              show.legend = FALSE, size=0.3) + 
+  geom_point(size=0.8) + 
+  facet_wrap(~Rank2, scales = 'free') + 
+  scale_color_brewer(palette='Set1') + 
+  labs(x=expression(Mean~z[j]~"for"~each~participant), 
+       y= expression(z[ij]~{"="}~{"log(standardised count)"}) ) + 
+  theme(legend.key.size = unit(1, "lines")
+        , legend.key=element_rect(colour = NA)
+        , legend.position = 'bottom'
+        , legend.margin = margin(0, 0,0,0) 
+        , strip.background=element_rect(fill=NA) 
+  )
+## Figure 3C
+
+rm(genuslabelbars, boxes, phyla_stats_summary, log_sd_plot, avgs_per_person)
+```
+
+
+```{r dim_analysis_plots}
+## Making dim_analysis (Beta diversity) plots 
+
+## Set seed for random number generator for UniFrac finding root of tree.
+set.seed(55)
+
+makeOrdPlot <- function(psWtree){
+  ordUnifracNMDS <- ordinate(psWtree, method="NMDS", distance="unifrac")
+  plt1 <- plot_ordination(psWtree, ordUnifracNMDS, shape='personID', color = 'personID',
+                          title="NMDS with UniFrac distances") + 
+    geom_point(size=1) # size = 3 for saving as A4
+  plt1$layers <- plt1$layers[-1]
+  plt1labs <- plt1 + labs(x='Dimension 1', y='Dimension 2') + 
+    scale_shape_discrete(name='Participant') + 
+    scale_colour_discrete(name='Participant') + 
+    theme(legend.key.size = unit(1, "lines")) + 
+    coord_fixed()
+  return(plt1labs)
+}
+
+# load(file=file.path(localRdata_fp, "phyloDataBySampleLvl2.rdata"), verbose=TRUE)
+WEHIordplot <- makeOrdPlot(otuBySampleBy3)
+WEHIordplot
+## Figure 2C
+
+rm(WEHIordplot)
+```
+
+
+```{r method_comparison_DESeq}
+library("DESeq2")
+library("Biobase")
+
+##########################################################################################################
+### Differential abundance Hypothesis testing between collection-processing methods using DESeq2 - min count 20 ###
+##########################################################################################################
+### Calculate geometric means prior to estimate size factors ###
+gm_mean = function(x, na.rm=TRUE){
+  exp(sum(log(x[x > 0]), na.rm=na.rm) / length(x))
+}
+
+diffAbund_fn <- function(phyloseqObj) {
+  ###Transform phyloseq biom to a DESeq2 data set ###
+  sample_data(phyloseqObj)$personID <- factor(sample_data(phyloseqObj)$personID)
+  sample_data(phyloseqObj)$Method <- relevel(factor(sample_data(phyloseqObj)$Method), 'D')
+  sample_data(phyloseqObj)$Stool <- factor(sample_data(phyloseqObj)$Stool)
+  DDSotu_mc20 <- phyloseq_to_deseq2(phyloseqObj, ~ personID + Stool + Method) 
+  geoMeans = apply(counts(DDSotu_mc20), 1, gm_mean)
+  ## Differential abundance analysis in separated steps ##
+  DDSotu_mc20 = estimateSizeFactors(DDSotu_mc20, geoMeans = geoMeans)
+  DESeq(DDSotu_mc20, fitType="local", parallel = TRUE)
+}
+
+res2methods_fn <- function(diffAbund, compMeth, baseMeth){
+  ### Contrasting 2 methods ###
+  methResOTU_mc20 <- results(diffAbund, contrast=c("Method",compMeth, baseMeth), 
+                             lfcThreshold = 1, altHypothesis = "greaterAbs",
+                             parallel = TRUE)
+  methResOTU_mc20Fil <- subset(methResOTU_mc20, padj < 0.05)
+  ## Sort by padj, resolve ties by baseMean
+  methResOTU_mc20Fil[
+    with(methResOTU_mc20Fil,order(padj, -baseMean)), ]
+}
+
+# load(file=file.path(localRdata_fp, "phyloDataBySampleLvl2.rdata"), verbose=TRUE)
+
+require("parallel") 
+par_cl <- makeCluster(10, type="FORK")
+
+#####################
+##     OTU         ##
+#####################
+
+OTUdeSeq <- diffAbund_fn(otuBySampleBy3)
+methResOTU_AD <- res2methods_fn(OTUdeSeq, 'A', 'D')
+methResOTU_BD <- res2methods_fn(OTUdeSeq, 'B', 'D')
+methResOTU_CD <- res2methods_fn(OTUdeSeq, 'C', 'D')
+methResOTU_AB <- res2methods_fn(OTUdeSeq, 'A', 'B')
+methResOTU_AC <- res2methods_fn(OTUdeSeq, 'A', 'C')
+methResOTU_BC <- res2methods_fn(OTUdeSeq, 'B', 'C')
+# Finish using cluster in parallel
+stopCluster(par_cl)
+
+## Replace 'Species' in column 7 of tax_table with concatenated list of 2:6
+tax_table(otuBySampleBy3)[,7] <- apply(tax_table(otuBySampleBy3), 1, 
+                                       function(otu){
+                                         paste0(otu[2:6], collapse = ';')}
+)
+## List of different OTUs
+diffOTU <- unique(c(rownames(methResOTU_AB), rownames(methResOTU_AC), rownames(methResOTU_AD), 
+                    rownames(methResOTU_BC), rownames(methResOTU_BD), rownames(methResOTU_CD)))
+## Proportion of all sequences
+sum(taxa_sums(otuBySampleBy3)[diffOTU]) / sum(taxa_sums(otuBySampleBy3))
+
+table(tax_table(otuBySampleBy3)[diffOTU, 7])  # o__Clostridiales;f__Lachnospiraceae;g__ and f__Ruminococcaceae;g__
+methResOTU_AC$test <- "A vs C"
+methResOTU_AC$taxon <- tax_table(otuBySampleBy3)[rownames(methResOTU_AC), 7]
+methResOTU_AD$test <- "A vs D"
+methResOTU_AD$taxon <- tax_table(otuBySampleBy3)[rownames(methResOTU_AD), 7]
+## Haven't redone Order and Phylum for WEHI: confident in Alexandra's earlier results of no difference
+
+methResOTU_AC
+methResOTU_AD
+## Table 1
+
+rm(list=ls(pattern="methResOTU_"), diffOTU)
+```
+
+
+
+```{r linearModelAlphaDiv}
+## Using simple linear models to characterise the differences 
+## between a richness or even-ness index for different treatments
+## WEHI data, aliquot level, minimum OTU count =20
+# load(file=file.path(localRdata_fp, "phyloDataBySampleLvl2.rdata"), verbose=TRUE)
+
+richBy2 <- estimate_richness(otuBySampleBy3, measures=c("Chao1", "InvSimpson") )
+richBy2_df <- data.frame(richBy2, sample_data(otuBySampleBy3))
+# Re-order to put Method=D first, so that it is baseline against which coefficients are made
+richBy2_df$Method <- relevel(as.factor(richBy2_df$Method), "D")
+
+# Fit a linear model with Inverse Simpson, method=='D' as contrast
+fit_isimpsPersMeth <- lm(InvSimpson ~ personID + Method + Stool, data=richBy2_df)
+summary(fit_isimpsPersMeth)
+anova(fit_isimpsPersMeth)
+TukeyHSD(aov(fit_isimpsPersMeth), "Method")
+## Table 2
+
+rm(richBy2, richBy2_df, fit_isimpsPersMeth)
+```
+
+
+
+```{r method_cluster_sizes}
+## Measuring effect of Method on distance between samples
+set.seed(55)
+# load(file=file.path(localRdata_fp, "phyloDataBySampleLvl2.rdata"), verbose=TRUE)
+
+require("doParallel")
+par_cl <- makeCluster(10, type="FORK")
+registerDoParallel(par_cl)
+
+## Having DESeq2 loaded has overwritten phyloseq distance() function
+distances_withinCluster <- NULL
+for (per in unique(sample_data(otuBySampleBy3)$personID)) {
+  psPerson <- subset_samples(otuBySampleBy3, (personID==per))
+  distances_withinCluster[[per]] <- phyloseq::distance(psPerson
+                                    #, method="unifrac"
+                                    , method="bray"
+                                    , parallel=TRUE)
+  # ...  for each {personID, Method} combination
+  for (meth in unique(sample_data(otuBySampleBy3)$Method)) {
+    psPerMethod <- subset_samples(psPerson, Method==meth)
+    distances_withinCluster[[paste0(per, meth)]] <- phyloseq::distance(psPerMethod
+                                   #, method="unifrac"
+                                   , method="bray"
+                                   , parallel=TRUE
+    )
+    rm(psPerMethod)
+  }
+  rm(psPerson)
+}
+rm(per)
+# Finish using cluster in parallel
+stopCluster(par_cl)
+
+pairnum <- 36 # sum(1:(9-1)) =  3 days by 3 aliquots, all pairs, 
+# except 55B where there is one missing, pad with NA
+methAdists <- sapply(unique(sample_data(otuBySampleBy3)$personID), function(per){
+  as.vector(distances_withinCluster[[paste0(per, 'A')]])
+} )
+methBdists <- sapply(unique(sample_data(otuBySampleBy3)$personID), function(per){
+  x <- as.vector(distances_withinCluster[[paste0(per, 'B')]])
+  length(x) <- pairnum
+  return(x)
+} )
+methCdists <- sapply(unique(sample_data(otuBySampleBy3)$personID), function(per){
+  as.vector(distances_withinCluster[[paste0(per, 'C')]])
+} )
+methDdists <- sapply(unique(sample_data(otuBySampleBy3)$personID), function(per){
+  as.vector(distances_withinCluster[[paste0(per, 'D')]])
+} )
+
+all_dist_df <- rbind( data.frame(melt(methAdists), method = 'A'), 
+                      data.frame(melt(methBdists), method = 'B'), 
+                      data.frame(melt(methCdists), method = 'C'), 
+                      data.frame(melt(methDdists), method = 'D')
+  )
+colnames(all_dist_df) <- c('pair', 'personID', 'pair_dist', 'method')
+all_dist_df$personID <- as.character(all_dist_df$personID)
+dists_perMeth_lm <- lm(pair_dist ~ method + personID, 
+                       data=all_dist_df)
+summary(dists_perMeth_lm)
+TukeyHSD(aov(dists_perMeth_lm), "method")
+## Supplementary Table S2, WW part
+
+rm(list=ls(pattern="dist"))
+```
+
+
+Remove WEHI data from the environment. 
+```{r cleanup_WEHI}
+rm(l6Std, l6Std_72, otuBySample, otuBySampleBy3, psL6prop, psL6prop_72, psWtree)
+```
+
+Re-run functions made above for Baylor College of Medicine data (WB)
+
+
+```{r load_biom_BCM}
+## Import the biom data using phyloseq, and pre-process.
+biom_fp <- file.path(data_fp, "WB_otu_table_mc3_allmeta.biom")
+tree_fp <- file.path(data_fp, "WB_rep_set_nonchim_mc20.tre") 
+localRdata_fp <- "local_BCM"
+# if (!file.exists(localRdata_fp)) dir.create(localRdata_fp)
+
+phyloData = import_biom(biom_fp)  
+# takes about three minutes. Makes phyloseq object. 
+# Tree was made for otu_table filtered to OTUs with count >= 20
+phylotree <- read_tree(tree_fp)
+
+## Merge repeated samples to combine to 72 samples 
+psSample_mc3 <- merge_samples(phyloData, "SampleNumber")
+## This loses some or all the sample data 
+## Remove column names that don't apply to merged categories. 
+## "Household pair" omitted as wasn't used in WW
+varsBySample <- c("SampleNumber", "personID", "Gender", "Age", "Storage", 
+                  "HoursToNeg80Storage", "Location", "Stool", "Method")
+sample_data(psSample_mc3) <- sample_data(psSample_mc3)[, varsBySample]
+## ( generalization would be to keep those which have a single value per SampleNumber)
+
+## Restore sample data from the original object. 
+## For each sampleNumber, find the sample_data(phyloData) records 
+## (All descriptions for 1 sample must be the same)
+for (v in varsBySample) {
+  sample_data(psSample_mc3)[[v]]<-
+    sapply(sample_names(psSample_mc3), function(x) {
+      unique(sample_data(phyloData)[
+        which(sample_data(phyloData)$SampleNumLvl2== x)][[v]])
+    } )
+}
+# save(psSample_mc3,
+#      file=file.path(localRdata_fp, "phyloDataBySample_mc3") )
+
+## Suppress small OTUs
+minOTUsize <- 20
+psOTUge20 <- prune_taxa(taxa_sums(phyloData) >= minOTUsize, phyloData)
+otuBySampleBy3 <- merge_phyloseq(psOTUge20, phylotree)
+## No level of sample below aliquot for BCM sequencing
+# save(otuBySampleBy3, 
+#     file=file.path(localRdata_fp, "phylo_mc20.rdata"))
+
+
+## Merge repeated samples to combine to 72 samples 
+otuBySample <- merge_samples(otuBySampleBy3, "SampleNumber")
+## Remove column names that don't apply to merged categories. 
+sample_data(otuBySample) <- sample_data(otuBySample)[, varsBySample]
+## Restore sample data from the original object. 
+for (v in varsBySample) {
+  sample_data(otuBySample)[[v]]<- 
+    sapply(sample_names(otuBySample), function(x) {
+      unique(sample_data(psOTUge20)[ 
+        which(sample_data(psOTUge20)$SampleNumber== x)][[v]])
+    } )
+}
+# save(otuBySample, file=file.path(localRdata_fp, "phyloDataBySample.rdata"))
+
+## Standardise counts to largest library size (scaled proportions)
+libSizeMax <- max(sample_sums(otuBySampleBy3))
+psOTUstd <- transform_sample_counts(otuBySampleBy3, standf)
+## Make a data object of proportions, as well
+psOTUprop <- transform_sample_counts(otuBySampleBy3, function(x) (x / sum(x)))
+
+## Agglomerate counts with the same taxa to Rank 6, Genus-level
+psL6prop <- genus_glom(psOTUprop)
+l6Std <- genus_glom(psOTUstd)
+# save(psOTUstd, psOTUprop, l6Std, psL6prop, file=file.path(localRdata_fp, "Stdcounts_and_propsLvl2.rdata"))
+
+## Repeat for Stool-level samples:
+libSizeMax <- max(sample_sums(otuBySample))
+psOTUstd <- transform_sample_counts(otuBySample, standf)
+psOTUprop <- transform_sample_counts(otuBySample, function(x) (x / sum(x)))
+
+psL6prop_72 <- genus_glom(psOTUprop)
+l6Std_72 <- genus_glom(psOTUstd)
+# save(l6Std_72, psL6prop_72, file=file.path(localRdata_fp, "Stdcounts_and_props.rdata"))
+rm(psOTUstd, psOTUprop, libSizeMax)
+```
+
+
+
+```{r alpha_rarefaction_extended_WB}
+# localRdata_fp <- "local_BCM"
+# load(file=file.path(localRdata_fp,
+#                    "phyloDataBySample_mc3.rdata") , verbose=TRUE)
+
+set.seed(55)
+rarefaction_baylor <- calculate_rarefaction_curves(
+  psSample_mc3, c('InvSimpson', 'Obs'),
+  rep(c(1:7 * 15000), each = 8))
+## Change row names
+if (!setequal(as.character(rarefaction_baylor$Sample),
+              row.names(sample_data(psSample_mc3)))) {
+  rarefaction_baylor$Sample <-
+    sub("^X", "", rarefaction_baylor$Sample)
+  if (!setequal(as.character(rarefaction_baylor$Sample),
+                row.names(sample_data(psSample_mc3)))) {
+    rarefaction_baylor$Sample <-
+      gsub(".",
+           "-",
+           as.character(rarefaction_baylor$Sample),
+           fixed = TRUE)
+  }
+}
+
+raref_verbose <- merge(
+  rarefaction_baylor,
+  data.frame(sample_data(psSample_mc3)),
+  by.x = 'Sample',
+  by.y = 'row.names'
+)
+
+rarefaction_baylor_means <-
+  ddply(
+    raref_verbose,
+    c('Depth', 'Measure', 'personID', 'Sample'),
+    summarise,
+    Alpha_diversity_mean = mean(Alpha_diversity),
+    Alpha_diversity_sd = sd(Alpha_diversity),
+    Alpha_diversity_sem = sd(Alpha_diversity)/sqrt(length(Alpha_diversity))
+    # Standard error of mean = s.d./sqrt(n) . n = #aliquots at that Depth * 8 subsamples
+  )
+#  save(raref_verbose, rarefaction_baylor_means, 
+#       file=file.path(localRdata_fp, "rareBaylor72mc3_woReplace.rdata")
+
+ggplot(
+  data = rarefaction_baylor_means[rarefaction_baylor_means$Measure %in%
+                                    c("Observed", "InvSimpson"), ],  # drop ACE
+  mapping = aes(
+    x = Depth,
+    y = Alpha_diversity_mean,
+    ymin = Alpha_diversity_mean - Alpha_diversity_sd,
+    ymax = Alpha_diversity_mean + Alpha_diversity_sd,
+    colour = personID, shape = personID, 
+    group = Sample
+  )
+) + geom_line(show.legend = NA) + geom_point(size=2)  + # geom_pointrange omitted because invisible
+  geom_vline(xintercept = min(sample_sums(psSample_mc3))) + 
+  labs(title="BCM richness, 72 samples, mc3, 8 x downsampled without replacement",
+       y="Mean alpha diversity") + 
+  facet_wrap(facets = ~ Measure,
+             scales = 'free_y')
+
+### Supplementary Figure S3B
+rm(raref_verbose)
+```
+
+
+
+```{r alpha_richness_plots_WB}
+## Make the alpha diversity and library size plots. 
+## Use all OTUs (min count=3), 216 samples
+## 2 measures side-by-side, downsampled data
+
+# load(file.path(localRdata_fp, "rareBaylor72mc3_woReplace.rdata"), verbose=TRUE)
+
+alpha_sub_ObsSimp <- rarefaction_baylor_means[
+  rarefaction_baylor_means$Measure %in% c("Observed", "InvSimpson"), ]
+prboxes <- ggplot(
+  data = alpha_sub_ObsSimp,
+  mapping = aes(x = personID,
+                y = Alpha_diversity_mean) 
+) + 
+  geom_boxplot(size=0.3, outlier.size=0.5) + 
+  facet_wrap(facets = ~ Measure,
+             scales = 'free_y') + 
+  expand_limits(y=c(0, 80))
+prboxes + labs(
+       x = 'Participant', 
+       y = 'Alpha diversity', 
+  title="72 Samples (12 per box), BCM data, mean of 10 subsamples")
+## Figure 4B
+
+rm(rarefaction_baylor_means, alpha_sub_ObsSimp)
+
+## Library sizes. As bar chart for each sample at stool level (72)
+# load(file.path(localRdata_fp, "phyloDataBySample_mc3.rdata"), verbose=TRUE) 
+libDir <- file.path(baseDir, "analysis/local/sample_sizes")
+
+libsize_df <- data.frame(libsize=sample_sums(psSample_mc3),
+                         sample_data(psSample_mc3),
+                         sXm=paste0(sample_data(psSample_mc3)$Stool, 
+                                    sample_data(psSample_mc3)$Method)
+)
+
+libsize_df$aliquot <- as.factor(
+  sapply(strsplit(as.character(sample_data(psSample_mc3)$SampleNumLvl2), '.', fixed = TRUE), "[[", 2)
+)
+
+ggplot(libsize_df[order(libsize_df$aliquot),], aes(x=sXm, y=libsize, fill=aliquot)) + 
+  geom_bar(stat="identity", col="black", size=0.2) + 
+  facet_wrap(~personID, scales="free_x") + 
+  theme(axis.text.x = element_text(angle = -90, hjust=0, vjust=0.5)) + 
+  scale_fill_brewer(palette="Pastel1",  
+                    guide=guide_legend(keyheight = 0.5)) +
+  labs(y="Number of sequences", title="", 
+       x="Sample: day and method") + 
+  theme(legend.position="bottom", 
+        legend.key = element_rect(size=NA))
+## Supplementary Figure S1B
+
+## Library sizes. Box-and-whiskers by Method
+ggplot(libsize_df, aes(x=Method, y=libsize)) +
+  geom_boxplot() +
+  expand_limits(y=0) +
+  labs(x = "Collection-processing method", 
+       y="Sequences per sample",
+       title="Size of 216 Samples, min count=3")
+## Supplementary Figure S5B
+```
+
+
+
+```{r taxa_abundance_plots_WB}
+## Load the proportional counts for 72 samples
+# load(file.path(localRdata_fp, "Stdcounts_and_props.rdata"), verbose=TRUE) 
+
+## Genus barplot (L6), list above of genus, or higher label where genus undefined,
+## present in at least 10% in any sample. 
+## Figure 4A
+genuslabelbars <- genusBarplot(psL6prop_72) # other parameters as default
+genuslabelbars
+
+##-----------
+# load(file.path(localRdata_fp, "Stdcounts_and_propsLvl2.rdata"), verbose=TRUE) 
+### Order (L4) box-and-whiskers, with log-scale. 
+boxes <- orderBoxplot(phyl_L6counts = l6Std) 
+print(boxes)
+## Supplementary Figure S2B
+```
+
+
+
+```{r dim_analysis_plots_WB}
+## Use scale_x_reverse and scale_y_reverse as needed to put personID=66 cluster 
+## in top left wherever possible
+# load(file.path(localRdata_fp, "phylo_mc20.rdata"), verbose=TRUE)
+BaylorOrdPlot <- makeOrdPlot(otuBySampleBy3) + 
+  scale_x_reverse() + scale_y_reverse() 
+BaylorOrdPlot
+## Figure 4C
+```
+
+
+
+```{r method_comparison_DESeq_WB}
+# load(file=file.path(localRdata_fp, "phylo_mc20.rdata") , verbose=TRUE)
+
+require("parallel") 
+par_cl <- makeCluster(10, type="FORK")
+
+#####################
+##     OTU         ##
+#####################
+
+OTUdeSeq <- diffAbund_fn(otuBySampleBy3)
+
+methResOTU_AD <- res2methods_fn(OTUdeSeq, 'A', 'D')
+methResOTU_BD <- res2methods_fn(OTUdeSeq, 'B', 'D')
+methResOTU_CD <- res2methods_fn(OTUdeSeq, 'C', 'D')
+
+nrow(methResOTU_AD)
+head(methResOTU_AD)
+
+## I want to summarize the taxa-table of the 26 OTUs diff between A and D for BCM sequences
+## Completing the set of 6 comparisons gives 54 different OTUs, all involving A
+methResOTU_AB <- res2methods_fn(OTUdeSeq, 'A', 'B')
+methResOTU_AC <- res2methods_fn(OTUdeSeq, 'A', 'C')
+methResOTU_BC <- res2methods_fn(OTUdeSeq, 'B', 'C')
+
+deOTU <- unique(c(rownames(methResOTU_AD), rownames(methResOTU_BD), rownames(methResOTU_CD), 
+                  rownames(methResOTU_BC), rownames(methResOTU_AB), rownames(methResOTU_AC)))
+table(tax_table(otuBySampleBy3)[deOTU, 'Rank2'])
+## Replace 'Species' in column 7 of tax_table with concatenated list of 2:6
+tax_table(otuBySampleBy3)[,7] <- apply(tax_table(otuBySampleBy3), 1, 
+                                            function(otu){
+                                              paste0(otu[2:6], collapse = ';')}
+                                            )
+table(tax_table(otuBySampleBy3)[deOTU, 7])  # 51 in Clostridiales
+methResOTU_AD$taxon <- tax_table(otuBySampleBy3)[deOTU, 7]
+## Are the Fold Changes consistent in direction?
+sum(methResOTU_AD[, 'log2FoldChange']>0)
+sum(methResOTU_AD[, 'log2FoldChange']<0)
+# No
+methResOTU_AC$test <- "A vs C"
+methResOTU_AC$taxon <- tax_table(otuBySampleBy3)[rownames(methResOTU_AC), 7]
+methResOTU_AB$test <- "A vs B"
+methResOTU_AB$taxon <- tax_table(otuBySampleBy3)[rownames(methResOTU_AB), 7]
+methResOTU_AD$test <- "A vs D"
+methResOTU_AD$taxon <- tax_table(otuBySampleBy3)[rownames(methResOTU_AD), 7]
+
+## Save results - Supp_data2
+
+################
+####  ORDER ####
+################
+
+## Agglomerate counts with the same taxa to Order
+Order_mc20 <- tax_glom(otuBySampleBy3, taxrank = "Rank4")
+taxa_names(Order_mc20)<-tax_table(Order_mc20)[,"Rank4"]
+
+Order_deSeq <- diffAbund_fn(Order_mc20)
+
+methResOrder_AD <- res2methods_fn(Order_deSeq, 'A', 'D')
+methResOrder_BD <- res2methods_fn(Order_deSeq, 'B', 'D')
+methResOrder_CD <- res2methods_fn(Order_deSeq, 'C', 'D')
+methResOrder_AB <- res2methods_fn(Order_deSeq, 'A', 'B')
+methResOrder_AC <- res2methods_fn(Order_deSeq, 'A', 'C')
+methResOrder_BC <- res2methods_fn(Order_deSeq, 'B', 'C')
+methResOrder_AC$test <- "A vs C"
+methResOrder_AB$test <- "A vs B"
+methResOrder_AD$test <- "A vs D"
+
+## Save results
+
+################
+####  PHYLA ####
+################
+
+## Agglomerate counts with the same taxa to Phylum
+Phyla_mc20 <- tax_glom(Order_mc20, taxrank = "Rank2")
+taxa_names(Phyla_mc20)<-tax_table(Phyla_mc20)[,"Rank2"]
+## Apply local DESeq function
+Phylum_deSeq <- diffAbund_fn(Phyla_mc20)
+
+methResPhyl_AD <- res2methods_fn(Phylum_deSeq, 'A', 'D')
+methResPhyl_BD <- res2methods_fn(Phylum_deSeq, 'B', 'D')
+methResPhyl_CD <- res2methods_fn(Phylum_deSeq, 'C', 'D')
+
+phylaProp <- transform_sample_counts(Phyla_mc20, function(x) (x / sum(x)))
+phylaPropA <- prune_samples(sample_data(phylaProp)$Method=="A", phylaProp)
+phylaPropD <- prune_samples(sample_data(phylaProp)$Method=="D", phylaProp)
+methResPhyl_AD$maxPropA <- apply(otu_table(phylaPropA), 2 - taxa_are_rows(phylaPropA), max)[
+  rownames(methResPhyl_AD)]
+methResPhyl_AD$maxPropD <- apply(otu_table(phylaPropD), 2 - taxa_are_rows(phylaPropA), max)[
+  rownames(methResPhyl_AD)]
+methResPhyl_AD$test <- "A vs D"
+methResPhyl_AB$test <- "A vs B"
+methResPhyl_AC$test <- "A vs C"
+
+# write.table(methResPhyl_AD, 
+#             file.path(outDir, 
+#                       'BCM_Phyladiffs_method.tsv'),
+#             quote = FALSE, sep='\t', col.names = NA, row.names = TRUE)
+# write.table(methResPhyl_AB, 
+#             file.path(outDir, 
+#                       'BCM_Phyladiffs_method.tsv'),
+#             append = TRUE, 
+#             quote = FALSE, sep='\t', col.names = NA, row.names = TRUE)
+# write.table(methResPhyl_AC, 
+#             file.path(outDir, 
+#                       'BCM_Phyladiffs_method.tsv'),
+#             append = TRUE, 
+#             quote = FALSE, sep='\t', col.names = NA, row.names = TRUE)
+## Supplementary Table S1
+# Finish using cluster in parallel
+stopCluster(par_cl)
+
+rm(list=ls(pattern="methRes"), list=ls(pattern="phylaProp"), list=ls(pattern="deSeq"))
+```
+
+
+
+```{r method_cluster_sizes_WB}
+## Measuring effect of Method on distance between samples
+set.seed(55)
+# load(file.path("localRdata_fp", "phylo_mc20.rdata"), verbose=TRUE)
+
+require("doParallel")
+par_cl <- makeCluster(10, type="FORK")
+registerDoParallel(par_cl)
+
+distances_withinCluster <- NULL
+for (per in unique(sample_data(otuBySampleBy3)$personID)) {
+  psPerson <- subset_samples(otuBySampleBy3, (personID==per))
+  distances_withinCluster[[per]] <- phyloseq::distance(psPerson
+                                    #, method="unifrac"
+                                    , method="bray"
+                                    , parallel=TRUE)
+  # ...  for each {personID, Method} combination
+  for (meth in unique(sample_data(otuBySampleBy3)$Method)) {
+    psPerMethod <- subset_samples(psPerson, Method==meth)
+    distances_withinCluster[[paste0(per, meth)]] <- phyloseq::distance(psPerMethod
+                                   #, method="unifrac"
+                                   , method="bray"
+                                   , parallel=TRUE
+    )
+    rm(psPerMethod)
+  }
+  rm(psPerson)
+}
+rm(per)
+# Finish using cluster in parallel
+stopCluster(par_cl)
+
+# save(distances_withinCluster, 
+#      file=file.path(localRdata_fp, "braycurtis_distancesMethod216samples.rdata"))
+
+methAdists <- sapply(unique(sample_data(otuBySampleBy3)$personID), function(per){
+  as.vector(distances_withinCluster[[paste0(per, 'A')]])
+} )
+methBdists <- sapply(unique(sample_data(otuBySampleBy3)$personID), function(per){
+  x <- as.vector(distances_withinCluster[[paste0(per, 'B')]])
+  return(x)
+} )
+methCdists <- sapply(unique(sample_data(otuBySampleBy3)$personID), function(per){
+  as.vector(distances_withinCluster[[paste0(per, 'C')]])
+} )
+methDdists <- sapply(unique(sample_data(otuBySampleBy3)$personID), function(per){
+  as.vector(distances_withinCluster[[paste0(per, 'D')]])
+} )
+
+all_dist_df <- rbind( data.frame(melt(methAdists), method = 'A'), 
+                      data.frame(melt(methBdists), method = 'B'), 
+                      data.frame(melt(methCdists), method = 'C'), 
+                      data.frame(melt(methDdists), method = 'D')
+  )
+colnames(all_dist_df) <- c('pair', 'personID', 'pair_dist', 'method')
+all_dist_df$personID <- as.character(all_dist_df$personID)
+dists_perMeth_lm <- lm(pair_dist ~ method + personID, 
+                       data=all_dist_df)
+summary(dists_perMeth_lm)
+TukeyHSD(aov(dists_perMeth_lm), "method")
+## Supplementary Table S2, WB part
+
+rm(list=ls(pattern="dist"))
+```
+
+End of WB work
+```{r cleanup_W_BCM}
+rm(phyloData, psSample_mc3, otuBySampleBy3, otuBySample, l6Std, psL6prop, 
+   l6Std_72, psL6prop_72)
+```
+
+Sequencing centre comparison - joint QIIME run
+WB_comparison_DESeq.R - load data section
+```{r WB_comparison_DESeq_load_data}
+localRdata_fp <- "local_BCM_1wellWEHI"
+### Load WEHI-BCM data - new OTU table with sequences of WEHI and BCM clustered together ###
+### OTU table with min 20 sequences per OTU ###
+
+### parseFunction is a function that takes as its first argument a character vector of 
+### taxonomic rank labels for a single OTU and parses and names each element.
+WBotu_mc20<- import_biom(file.path(data_fp,"Wcombined_otu_table_mc20_allmeta.biom"),
+                         parseFunction = parse_taxonomy_greengenes)
+## parseFunction raises a warning for each entry. It successfully translates the rank elements,
+## but also keeps the old Rank1 to Rank7 names, filled with NA
+tax_table(WBotu_mc20) <- tax_table(WBotu_mc20)[, 1:7]
+
+## keep only the columns of interest for sample data##
+varsBySample <- c("SampleNumber", "personID", "Stool", "Method", "Gender", "SeqCentre",
+                  "SampleNumLvl2", "HoursToNeg80Storage")
+sample_data(WBotu_mc20) <- sample_data(WBotu_mc20)[, varsBySample]
+
+### import the tree created in QIIME ###
+phylotree<-read_tree(file.path(data_fp,
+                               "Wcombined_rep_set_nonchim_mc20.tre"))
+
+### Make a phyloseq object that has the phylogenetic tree ###
+WBotu_mc20_Complete<-phyloseq(otu_table(WBotu_mc20), tax_table(WBotu_mc20),
+                              sample_data(WBotu_mc20), phylotree)
+## Save and tidy up
+# if (!file.exists(localRdata_fp)) dir.create(localRdata_fp)
+# save(WBotu_mc20_Complete, file=file.path(localRdata_fp, "phylo_mc20_431Samples.rdata"))
+rm(phylotree, WBotu_mc20)
+```
+
+WB_comparison_DESeq.R - DESeq section
+```{r WB_comparison_DESeq_DESeq}
+### Differential abundance Hypothesis testing between WEHI and BCM data using DESeq2 - min count 20 ###
+gm_mean = function(x, na.rm=TRUE){
+  exp(sum(log(x[x > 0]), na.rm=na.rm) / length(x))
+}
+
+SeqCentreRes_fn <- function(phyloseqObj) {
+  ###Transform phyloseq biom to a DESeq2 data set ###
+  DDSotu_mc20 <- phyloseq_to_deseq2(phyloseqObj, ~ personID + Stool + Method + SeqCentre) 
+  geoMeans = apply(counts(DDSotu_mc20), 1, gm_mean)
+  ## Differential abundance analysis in separated steps ##
+  DDSotu_mc20 = estimateSizeFactors(DDSotu_mc20, geoMeans = geoMeans)
+  DDSotu_mc20 = DESeq(DDSotu_mc20, fitType="local")
+  ### Contrasting Sequencing centre B to W ( default contrast is last factor in formula) ###
+  SeqCentreResOTU_mc20 <- results(DDSotu_mc20, lfcThreshold = 1, altHypothesis = "greaterAbs")
+  SeqCentreResOTU_mc20Fil <- subset(SeqCentreResOTU_mc20, padj < 0.05)
+  ## Sort by padj, resolve ties by baseMean
+  SeqCentreResOTU_mc20Fil[
+    with(SeqCentreResOTU_mc20Fil,order(padj, -baseMean)), ]
+}
+
+##     OTU         ##
+#### converting all used data in sample_data to factors ###
+sample_data(WBotu_mc20_Complete)$personID <- as.factor(sample_data(WBotu_mc20_Complete)$personID)
+sample_data(WBotu_mc20_Complete)$Stool <- as.factor(sample_data(WBotu_mc20_Complete)$Stool)
+sample_data(WBotu_mc20_Complete)$Method <- as.factor(sample_data(WBotu_mc20_Complete)$Method)
+sample_data(WBotu_mc20_Complete)$SeqCentre <- as.factor(sample_data(WBotu_mc20_Complete)$SeqCentre)
+
+SeqCentreResOTU_mc20Fil <- SeqCentreRes_fn(WBotu_mc20_Complete)
+
+## Summarize the taxa-table of these 248 OTUs
+deOTU <- rownames(SeqCentreResOTU_mc20Fil)
+## Replace 'Species' in column 7 of tax_table with concatenated list of 2:6
+tax_table(WBotu_mc20_Complete)[,7] <- apply(tax_table(WBotu_mc20_Complete), 1, 
+                                            function(otu){
+                                              paste0(otu[2:6], collapse = ';')}
+                                            )
+SeqCentreResOTU_mc20Fil$taxon <- tax_table(WBotu_mc20_Complete)[deOTU, 7]
+## Save results
+# write.table(SeqCentreResOTU_mc20Fil, 
+#             file.path(outDir, 
+#                       'W1cell_B_OTUdiffs_p_filt.tsv'),
+#             quote = FALSE, sep='\t', col.names = NA, row.names = TRUE)
+## Supplementary data Supp_data1_WW_WB_OTUdiffs_p_filt.xlsx
+## In Excell I broke taxon column into separate columns
+
+## Summary of orders of diff abund OTUs 
+addmargins(table(tax_table(WBotu_mc20_Complete)[deOTU, 'Order']), 
+           ifelse(taxa_are_rows(WBotu_mc20_Complete), 1, 2))
+## Proportions of 2 largest Orders 
+# sum(tax_table(WBotu_mc20_Complete)[deOTU, 'Order']=='Clostridiales') / 
+#  nrow(SeqCentreResOTU_mc20Fil)
+sum(SeqCentreResOTU_mc20Fil$Order=='Clostridiales') / nrow(SeqCentreResOTU_mc20Fil)
+sum(SeqCentreResOTU_mc20Fil$Order=='Bacteroidales') / nrow(SeqCentreResOTU_mc20Fil)
+
+## Are Fold Changes in order Clostridiales consistent in direction?
+otuClost <- which(tax_table(WBotu_mc20_Complete)[deOTU, 'Order']=="Clostridiales")
+sum(SeqCentreResOTU_mc20Fil[otuClost, 'log2FoldChange']>0)
+sum(SeqCentreResOTU_mc20Fil[otuClost, 'log2FoldChange']<0)
+# No
+
+## plot WB OTU ##  Supplementary Figure S4
+identical(subset(SeqCentreResOTU_mc20, padj < 0.05), subset(SeqCentreResOTU_mc20, pvalue < 0.005))
+# padj < 0.05 gives same set as pvalue < 0.005, so alpha = 0.005 colours correct 248 points
+
+plotMA(SeqCentreResOTU_mc20, alpha=0.005,  # default: pvalue < 0.1
+       ylim=c(-3, 3))
+# triangles indicate points outside ylim values
+abline(h=c(-1,1), col="dodgerblue", lwd=2)
+
+####  ORDER ####
+## Agglomerate counts with the same taxa to Order
+Order_mc20 <- tax_glom(WBotu_mc20_Complete, taxrank = "Order")
+taxa_names(Order_mc20)<-tax_table(Order_mc20)[,"Order"]
+
+SeqCentreResO_mc20Fil <- SeqCentreRes_fn(Order_mc20)
+SeqCentreResO_mc20Fil
+
+OrderProp <- transform_sample_counts(Order_mc20, function(x) (x / sum(x)))
+OrderPropW <- prune_samples(sample_data(OrderProp)$SeqCentre=="W", OrderProp)
+OrderPropB <- prune_samples(sample_data(OrderProp)$SeqCentre=="B", OrderProp)
+SeqCentreResO_mc20Fil$maxPropWEHI <- apply(otu_table(OrderPropW), 1, max)[
+  rownames(SeqCentreResO_mc20Fil)]
+SeqCentreResO_mc20Fil$maxPropBCM <- apply(otu_table(OrderPropB), 1, max)[
+  rownames(SeqCentreResO_mc20Fil)]
+## Save results:  Table 3
+
+####  PHYLA ####
+## Agglomerate counts with the same taxa to Phylum
+Phyla_mc20 <- tax_glom(Order_mc20, taxrank = "Phylum")
+taxa_names(Phyla_mc20)<-tax_table(Phyla_mc20)[,"Phylum"]
+## Apply local DESeq function
+SeqCentreResP_mc20Fil <- SeqCentreRes_fn(Phyla_mc20)
+SeqCentreResP_mc20Fil
+
+phylaProp <- transform_sample_counts(Phyla_mc20, function(x) (x / sum(x)))
+phylaPropW <- prune_samples(sample_data(phylaProp)$SeqCentre=="W", phylaProp)
+phylaPropB <- prune_samples(sample_data(phylaProp)$SeqCentre=="B", phylaProp)
+SeqCentreResP_mc20Fil$maxPropWEHI <- apply(otu_table(phylaPropW), 1, max)[
+  rownames(SeqCentreResP_mc20Fil)]
+SeqCentreResP_mc20Fil$maxPropBCM <- apply(otu_table(phylaPropB), 1, max)[
+  rownames(SeqCentreResP_mc20Fil)]
+
+## Save results: Table 3
+
+rm(list=ls("SeqCentreRes"), list=ls("Prop"))
+```
+
+
+WB_comparison_DESeq.R - Beta diversity section
+```{r WB_comparison_Beta_diversity}
+##### Dimensional Analysis of Beta Diversity #####
+# load(file=file.path(localRdata_fp, "phylo_mc20_431Samples.rdata"), verbose = TRUE)
+
+ordination_mc20default<-ordinate(WBotu_mc20_Complete)
+
+p_bray_dca <- plot_ordination(WBotu_mc20_Complete, ordination_mc20default, type="samples",
+  color="SeqCentre", shape="personID",
+  title=NULL) +
+  geom_point(size=1) # size = 3 for saving as A4
+p_bray_dca$layers <- p_bray_dca$layers[-1]
+p_bray_dca + coord_fixed() + 
+  scale_x_reverse() + 
+  scale_color_brewer(labels=c('B', 'W'), palette='Set1') + 
+  theme(legend.key.size = unit(0.5, "lines"), 
+        legend.position="bottom", 
+        legend.direction = 'horizontal',
+        legend.key=element_rect(colour = NA)) + 
+  guides(shape=guide_legend(nrow=1, byrow=TRUE)) +
+  labs(colour='Sequencing center', shape='Participant')
+## Figure 5
+
+rm(ordination_mc20default, p_bray_dca)
+```
+
+End of joint QIIME run work
+```{r cleanup_WBcombined}
+rm(WBotu_mc20_Complete, localRdata_fp)
+```
+
+
+Baylor College Medicine original biom work
+```{r load_biom_BCM_orig}
+## Reading the rarefied biom file produced by BCM from their bioinformatics pipeline
+## "PennoM_P2_StrictMerge.biom"
+## and reproducing plots for it
+biom_fp <- file.path(data_fp, "BCM_StrictMerge.biom")
+map_fp <- file.path(data_fp, "BCM_Mapping_SampleSheet.txt")
+tree_fp <- file.path(data_fp, "silva123_V4.tre") 
+
+# localRdata_fp <- "BCM_data"
+
+phyloData = import_biom(biom_fp)  
+phyloData <- merge_phyloseq(phyloData, import_qiime_sample_data(map_fp) )
+phylotree <- read_tree(tree_fp)
+phyloData <- merge_phyloseq(phyloData, phylotree)
+rm(phylotree)
+
+otuBySample <- merge_samples(phyloData, "SampleNumber")
+## merge_samples seems to have been improved - no NAs, no lists.
+## But - all factors converted to numeric
+varsNotNum <- c("SampleNumber", "personID", "Gender", "Age", "Location", 
+                "Household.pair", "Stool", "Method", "Storage")
+## Remove column names that don't apply to merged categories. 
+varsBySample <- c(varsNotNum, 
+                  "HoursToNeg80Storage")
+sample_data(otuBySample) <- sample_data(otuBySample)[, varsBySample]
+## Convert sample data except Storage to characters
+for (v in varsNotNum) {
+  sample_data(otuBySample)[[v]]<- 
+    sapply(sample_names(otuBySample), function(x) {
+      as.character(sample_data(phyloData)[ 
+        which(sample_data(phyloData)$SampleNumber== x)][1][[v]])
+    } )
+}
+
+# save(phyloData, otuBySample, file=file.path(localRdata_fp, "phyloOrigPennoStrictMerge.rdata"))
+
+## Make a data object of proportions
+psOTUprop <- transform_sample_counts(otuBySample, function(x) (x / sum(x)))
+
+## Agglomerate counts with the same taxa to Rank 6, Genus-level
+psL6prop <- tax_glom(psOTUprop, taxrank="Rank6", NArm=FALSE)
+# save(phyloData, otuBySample, psL6prop,
+#      file=file.path(localRdata_fp, "phyloOrigPennoStrictMerge.rdata"))
+```
+
+Genus-proportions bar plot - BB
+```{r Genus_prop_bar_BB}
+### Genus barplot (L6), There are 12 with more than 10% in some sample. 
+## Use a blend of these with list developed for WEHI pipeline.
+tax_table(psL6prop)[which(apply(otu_table(psL6prop), 2, max) >=0.1), c(2,4:6)]
+## taxa names below Rank1 all start with '__' . Remove
+tax_table(psL6prop) <- apply(tax_table(psL6prop), 1:2, 
+                              function(s){if (grepl('__', s)) 
+                                unlist(strsplit(s, '__'))[2] else s})
+
+## Run/load from taxa_abundance_plots.R: 
+##   palette_phyl, applyNewGenusLabel, genusBarplot
+
+genusLabelList <- c( # 4 Order Bacteroidales (2 genera, 1 family, + order)
+  'Bacteroides', 'Prevotellaceae_UCG_001' , 'Bacteroidales_S24_7_group', 'Bacteroidales'
+  # 5 Order Clostridiales (4 genera + order)
+  , 'Lachnospiraceae_UCG_008', 'Pseudobutyrivibrio', 'Faecalibacterium', 'Subdoligranulum'
+  , 'Clostridiales' 
+  # 2 Proteobacteria (1 genus + order)
+  ,  'Haemophilus', 'Proteobacteria' 
+  # 1 p__Actinobacteria
+  , 'Bifidobacterium'
+)
+
+palette_genus <- c(brewer.pal(5, "Reds")[c(4,2,3,5)], #  4 x red for bacter,
+                   brewer.pal(6, "Blues")[c(4,2,5,3,6)],   # 5 x blue for firmi
+                   brewer.pal(4, "Greens")[c(2,4)],   # 2 shades of green for proteo
+                   palette_phyl[4],  # brown for actino
+                   palette_phyl[10]  # black for 'other'
+)
+
+genuslabelbars <- genusBarplot(psL6prop) # other parameters as default
+genuslabelbars
+## Supplementary Figure S6A
+```
+
+Beta diversity - BB
+```{r Beta_div_BB}
+## Dissimilarity Ordination plot 
+sample_data(phyloData)$personID <- as.character(sample_data(phyloData)$personID)
+ordUnifracNMDS <- ordinate(phyloData, method="NMDS", distance="unifrac")
+
+library(vegan)
+stressplot(ordUnifracNMDS)
+
+plt1 <- plot_ordination(phyloData, ordUnifracNMDS, shape='personID', color = 'personID',
+                        title="NMDS with UniFrac distances") + 
+  geom_point(size=3)
+plt1$layers <- plt1$layers[-1]
+plt1labs <- plt1 + labs(x='Dimension 1', y='Dimension 2') + 
+  scale_shape_discrete(name='Participant') + 
+  scale_colour_discrete(name='Participant')
+plt1labs + coord_fixed() + scale_x_reverse() # '66' in top left
+## Supplementary Figure S6B
+```
+
+Log(counts) for top 4 phyla - BB
+```{r top4phyla_logsBB}
+### Mean and sd of top 4 phyla by Method, faceted by Phylum ###
+## Require from taxa_abundance_plots: avg_log_transform_fn, log_sd_xPerson_fPhyla_plot
+
+## Standardise counts to largest library size (scaled proportions)
+libSizeMax <- max(sample_sums(phyloData))
+standf = function(x) round(libSizeMax * x / sum(x))
+psOTUstd <- transform_sample_counts(phyloData, standf)
+phyla_stats_summary <- avg_log_transform_fn(psOTUstd)
+log_sd_plot <- log_sd_xPerson_fPhyla_plot(phyla_stats_summary)
+log_sd_plot
+## Supplementary Figure S6C
+```
+
+BCM_biom_phyla_stats.R
+```{r phyla_statsBB}
+## DESEq2 on Phyla counts by method ##
+
+Phyla_baylorbiom <- tax_glom(phyloData, taxrank = "Rank2")
+taxa_names(Phyla_baylorbiom) <- gsub('__', '', tax_table(Phyla_baylorbiom)[,"Rank2"])
+
+DDSbaylorbiom <- phyloseq_to_deseq2(Phyla_baylorbiom, ~ personID + Method + Stool)
+geoMeans = apply(counts(DDSbaylorbiom), 1, gm_mean)
+DDSbaylorbiom = estimateSizeFactors(DDSbaylorbiom, geoMeans = geoMeans)
+DDSbaylorbiom = DESeq(DDSbaylorbiom, fitType="local")
+
+methodPhylaresAB <- results(DDSbaylorbiom,contrast=c("Method","A","B"), 
+                            lfcThreshold=1, altHypothesis="greaterAbs")
+subset(methodPhylaresAB, padj < 0.05)
+methodPhylaresAC <- results(DDSbaylorbiom,contrast=c("Method","A","C"), 
+                            lfcThreshold=1, altHypothesis="greaterAbs")
+subset(methodPhylaresAC, padj < 0.05)
+methodPhylaresAD <- results(DDSbaylorbiom,contrast=c("Method","A","D"), 
+                            lfcThreshold=1, altHypothesis="greaterAbs")
+subset(methodPhylaresAD, padj < 0.05)
+methodPhylaresBC <- results(DDSbaylorbiom,contrast=c("Method","B","C"), 
+                            lfcThreshold=1, altHypothesis="greaterAbs")
+subset(methodPhylaresBC, padj < 0.05)
+methodPhylaresBD <- results(DDSbaylorbiom,contrast=c("Method","B","D"), 
+                            lfcThreshold=1, altHypothesis="greaterAbs")
+subset(methodPhylaresBD, padj < 0.05)
+methodPhylaresCD <- results(DDSbaylorbiom,contrast=c("Method","C","D"), 
+                            lfcThreshold=1, altHypothesis="greaterAbs")
+subset(methodPhylaresCD, padj < 0.05)
+
+## Supplementary Table S3
+```
